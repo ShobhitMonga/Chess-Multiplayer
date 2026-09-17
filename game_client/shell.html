@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no"/>
+    <title>Multiplayer Chess</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0;
+            background: radial-gradient(circle at center, #2b2b2b 0%, #121212 100%);
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh;
+            color: white;
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+        }
+        canvas { 
+            border-radius: 12px;
+            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        /* Hide all the default Emscripten UI garbage */
+        textarea.emscripten { display: none; }
+        div.emscripten { display: none; }
+        .spinner { display: none; }
+        #status { display: none; }
+        #progress { display: none; }
+    </style>
+  </head>
+  <body>
+    <!-- The canvas where Raylib draws the game -->
+    <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex=-1></canvas>
+    
+    <script type='text/javascript'>
+      var Module = {
+        canvas: (function() {
+          var canvas = document.getElementById('canvas');
+          canvas.addEventListener("webglcontextlost", function(e) { alert('WebGL context lost. You will need to reload the page.'); e.preventDefault(); }, false);
+          return canvas;
+        })()
+      };
+
+      let peerConnection;
+      let localStream;
+      let pendingMessages = [];
+      let pendingIceCandidates = [];
+
+      function logMsg(msg) {
+          let div = document.getElementById('debug-log');
+          if(!div) {
+              div = document.createElement('div');
+              div.id = 'debug-log';
+              div.style.position = 'absolute';
+              div.style.top = '10px';
+              div.style.left = '10px';
+              div.style.color = 'lime';
+              div.style.background = 'rgba(0,0,0,0.8)';
+              div.style.padding = '10px';
+              div.style.fontFamily = 'monospace';
+              div.style.zIndex = '9999';
+              document.body.appendChild(div);
+          }
+          div.innerHTML += msg + '<br>';
+      }
+
+      async function processWebRTCPayload(payload) {
+          if (payload.sdp) {
+              logMsg("Received SDP: " + payload.sdp.type);
+              await peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+              if (payload.sdp.type === 'offer') {
+                  const answer = await peerConnection.createAnswer();
+                  await peerConnection.setLocalDescription(answer);
+                  Module.ccall('sendWebRTCMessage', 'null', ['string'], [JSON.stringify({ type: 'webrtc', payload: { sdp: peerConnection.localDescription } })]);
+                  logMsg("Sent SDP answer");
+              }
+              for (let ice of pendingIceCandidates) {
+                  try {
+                      await peerConnection.addIceCandidate(new RTCIceCandidate(ice));
+                      logMsg("Added queued ICE");
+                  } catch(e) { logMsg("ICE err: " + e.message); }
+              }
+              pendingIceCandidates = [];
+          } else if (payload.ice) {
+              if (!peerConnection.remoteDescription) {
+                  pendingIceCandidates.push(payload.ice);
+                  logMsg("Queued ICE");
+              } else {
+                  try {
+                      await peerConnection.addIceCandidate(new RTCIceCandidate(payload.ice));
+                      logMsg("Added ICE");
+                  } catch(e) { logMsg("ICE err: " + e.message); }
+              }
+          }
+      }
+
+      window.handleWebRTCMessage = async function(msgStr) {
+          try {
+              let data = JSON.parse(msgStr);
+              let payload = data.payload;
+              if (!peerConnection) {
+                  logMsg("Queueing incoming message (PC not ready)");
+                  pendingMessages.push(payload);
+                  return;
+              }
+              await processWebRTCPayload(payload);
+          } catch(e) { logMsg("Error in handleWebRTCMessage: " + e.message); }
+      };
+
+      window.startWebRTC = async function(isInitiator) {
+          logMsg("startWebRTC called. Initiator: " + isInitiator);
+          try {
+              localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+              logMsg("Got microphone access");
+              
+              peerConnection = new RTCPeerConnection({
+                  iceServers: [
+                      { urls: 'stun:stun.l.google.com:19302' },
+                      { urls: 'stun:stun1.l.google.com:19302' },
+                      { urls: 'stun:stun2.l.google.com:19302' },
+                      { urls: 'stun:stun3.l.google.com:19302' },
+                      { urls: 'stun:stun4.l.google.com:19302' },
+                      {
+                          urls: 'turn:openrelay.metered.ca:80',
+                          username: 'openrelayproject',
+                          credential: 'openrelayproject'
+                      },
+                      {
+                          urls: 'turn:openrelay.metered.ca:443',
+                          username: 'openrelayproject',
+                          credential: 'openrelayproject'
+                      },
+                      {
+                          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                          username: 'openrelayproject',
+                          credential: 'openrelayproject'
+                      }
+                  ]
+              });
+
+              peerConnection.oniceconnectionstatechange = () => logMsg("ICE State: " + peerConnection.iceConnectionState);
+
+              localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+              peerConnection.onicecandidate = event => {
+                  if (event.candidate) {
+                      Module.ccall('sendWebRTCMessage', 'null', ['string'], [JSON.stringify({ type: 'webrtc', payload: { ice: event.candidate } })]);
+                  }
+              };
+
+              peerConnection.ontrack = event => {
+                  logMsg("Received remote audio track!");
+                  let remoteAudio = document.getElementById('remoteAudio');
+                  if (!remoteAudio) {
+                      remoteAudio = document.createElement('audio');
+                      remoteAudio.id = 'remoteAudio';
+                      remoteAudio.autoplay = true;
+                      remoteAudio.controls = true; // Add controls so user can interact if needed
+                      remoteAudio.style.position = 'absolute';
+                      remoteAudio.style.top = '10px';
+                      remoteAudio.style.right = '10px';
+                      remoteAudio.style.zIndex = '9999';
+                      document.body.appendChild(remoteAudio);
+                  }
+                  remoteAudio.srcObject = event.streams[0];
+                  remoteAudio.play().then(() => logMsg("Audio playing")).catch(e => logMsg("Audio play failed: " + e));
+              };
+
+              for (let payload of pendingMessages) {
+                  await processWebRTCPayload(payload);
+              }
+              pendingMessages = [];
+
+              if (isInitiator) {
+                  const offer = await peerConnection.createOffer();
+                  await peerConnection.setLocalDescription(offer);
+                  Module.ccall('sendWebRTCMessage', 'null', ['string'], [JSON.stringify({ type: 'webrtc', payload: { sdp: peerConnection.localDescription } })]);
+                  logMsg("Sent SDP offer");
+              }
+          } catch (e) {
+              logMsg("Error starting WebRTC: " + e);
+          }
+      };
+    </script>
+    {{{ SCRIPT }}}
+  </body>
+</html>

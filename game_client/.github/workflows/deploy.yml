@@ -1,0 +1,51 @@
+name: Deploy Game to Web
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+
+      - name: Download Raylib and Minimal Shell
+        run: |
+          wget https://github.com/raysan5/raylib/releases/download/5.0/raylib-5.0_webassembly.zip
+          unzip raylib-5.0_webassembly.zip
+          wget https://raw.githubusercontent.com/raysan5/raylib/master/src/minshell.html
+          
+      - name: Compile Game
+        run: |
+          mkdir public
+          em++ gui_chess.cpp -o public/index.html -Os -Wall raylib-5.0_webassembly/lib/libraylib.a -I raylib-5.0_webassembly/include -I include -s USE_GLFW=3 -s ASYNCIFY -DPLATFORM_WEB --shell-file minshell.html --preload-file assets
+          
+          # Center the game and add a premium dark background with a shadow
+          echo "<style>body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #1a1a1a; } canvas { box-shadow: 0 15px 50px rgba(0,0,0,0.8); border-radius: 8px; }</style>" >> public/index.html
+          
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
