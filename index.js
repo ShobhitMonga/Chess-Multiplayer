@@ -45,6 +45,8 @@ wss.on('connection', (ws) => {
                 
                 if (data.type === 'move') {
                     opponent.send(JSON.stringify({ type: 'move', data: data.data }));
+                } else if (data.type === 'webrtc') {
+                    opponent.send(message.toString());
                 }
             }
         } catch (err) {
